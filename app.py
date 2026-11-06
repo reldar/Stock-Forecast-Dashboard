@@ -14,42 +14,48 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 forecast_tickers = ["NVDA", "GOOGL", "MU", "SPY"]
+crypto_names = {"BTC": "Bitcoin", "ETH": "Ethereum", "ZEREBRO": "Zerebro",
+                "TRX": "TRON", "HYPE": "Hyperliquid"}
 eastern = ZoneInfo("America/New_York")
 pacific = ZoneInfo("America/Los_Angeles")
 step = pd.Timedelta(minutes=15)
 
 market = mcal.get_calendar("NYSE")
 
-def download_intraday(*, extended=False):
+def download_intraday(*, extended=False, crypto_symbol=None):
+    symbols = [crypto_symbol] if crypto_symbol else forecast_tickers
     today = pd.Timestamp.now(tz=eastern).date()
     date_range = (
         {"start": today - timedelta(days=7), "end": today + timedelta(days=1)}
         if extended else {"period": "1mo"}
     )
     raw = yf.download(
-        forecast_tickers, interval="15m", auto_adjust=True,
+        symbols, interval="15m", auto_adjust=True, multi_level_index=True,
         prepost=extended, progress=False, ignore_tz=False, **date_range,
     )
     if raw is None or raw.empty or "Close" not in raw.columns.get_level_values(0):
         raise RuntimeError("Yahoo Finance returned no intraday prices. Try refreshing.")
-    prices = raw["Close"].reindex(columns=forecast_tickers).sort_index()
+    prices = raw["Close"].reindex(columns=symbols).sort_index()
     prices.index = prices.index.tz_convert(eastern) + step
     return prices.loc[prices.index <= pd.Timestamp.now(tz=eastern)]
 
-def analyze_path(price, now, bars_ahead):
+def analyze_path(price, now, bars_ahead, *, is_crypto=False):
     horizons = list(range(1, bars_ahead + 1))
     session = price.index.normalize()
-    daily = price.groupby(session)
-    times = price.index.to_series().groupby(session)
+    groups = [0] * len(price) if is_crypto else session
+    daily = price.groupby(groups)
+    times = price.index.to_series().groupby(groups)
     valid = (times.diff() == step) & (times.diff(4) == 4 * step)
     features = pd.DataFrame({
         "Past 15 minutes": daily.pct_change(fill_method=None),
         "Past hour": daily.pct_change(4, fill_method=None),
     }).loc[valid].dropna()
 
-    schedule = market.schedule(start_date=price.index[0].date(), end_date=now.date())
-    closes = schedule["market_close"].reindex(session.tz_localize(None))
-    fits = pd.Series(price.index + bars_ahead * step <= pd.DatetimeIndex(closes), index=price.index)
+    fits = pd.Series(True, index=price.index)
+    if not is_crypto:
+        schedule = market.schedule(start_date=price.index[0].date(), end_date=now.date())
+        closes = schedule["market_close"].reindex(session.tz_localize(None))
+        fits = pd.Series(price.index + bars_ahead * step <= pd.DatetimeIndex(closes), index=price.index)
     targets = pd.DataFrame({
         h: price.reindex(price.index + h * step).to_numpy() / price - 1
         for h in horizons
@@ -60,7 +66,7 @@ def analyze_path(price, now, bars_ahead):
         raise RuntimeError("At least five usable trading days are needed for this ticker.")
 
     split = days[int(len(days) * 0.8)]
-    train = samples.loc[samples.index < split]
+    train = samples.loc[samples.index + bars_ahead * step < split]
     test = samples.loc[samples.index >= split]
     columns = features.columns
     model = make_pipeline(StandardScaler(), Ridge(alpha=10))
@@ -86,8 +92,8 @@ st.title("Stock Forecast Dashboard")
 st.caption("15-minute market prices and experimental intraday projections")
 
 @st.cache_data(ttl=240, show_spinner=False)
-def load_prices(extended):
-    return download_intraday(extended=extended)
+def load_prices(extended, crypto_symbol=None):
+    return download_intraday(extended=extended, crypto_symbol=crypto_symbol)
     
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlencode
@@ -99,6 +105,8 @@ NEWS_QUERIES = {
     "GOOGL": ("Alphabet Google", "Google antitrust regulation"),
     "MU": ("Micron Technology", "Micron chip tariffs export controls"),
     "SPY": ("S&P 500", "US stocks Federal Reserve tariffs government policy"),
+    **{ticker: (f"{name} crypto", f"{name} crypto regulation policy")
+       for ticker, name in crypto_names.items()},
 }
 
 @st.cache_data(ttl=240, show_spinner=False)
@@ -215,26 +223,31 @@ def load_minute_prices(ticker, extended):
 @st.fragment(run_every="1m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
-    ticker = controls[0].selectbox("Ticker", forecast_tickers)
-    controls[0].link_button(f"{ticker} on Yahoo Finance", f"https://finance.yahoo.com/quote/{ticker}/")
+    ticker = controls[0].selectbox("Ticker", [*forecast_tickers, *crypto_names])
+    is_crypto = ticker in crypto_names
+    quote_symbol = f"{ticker}-USD" if is_crypto else ticker
+    controls[0].link_button(f"{ticker} on Yahoo Finance", f"https://finance.yahoo.com/quote/{quote_symbol}/")
     hours = controls[1].selectbox("Forecast horizon", [1, 2], format_func=lambda h: f"{h} hour" if h == 1 else f"{h} hours")
-    extended = controls[2].checkbox("Include extended hours", value=True)
+    if is_crypto:
+        controls[2].caption("Crypto · 24/7 · USD")
+    extended = not is_crypto and controls[2].checkbox("Include extended hours", value=True)
     if controls[3].button("Refresh prices"):
         load_prices.clear()
         fetch_headlines.clear()
         load_minute_prices.clear()
-    with st.expander(f"Overnight market · {ticker}"):
-        st.caption("Blue Ocean ATS overnight prices. The amber model uses regular-session data.")
-        show_streaming_chart(ticker, extended=False, overnight=True)
+    if not is_crypto:
+        with st.expander(f"Overnight market · {ticker}"):
+            st.caption("Blue Ocean ATS overnight prices. The amber model uses regular-session data.")
+            show_streaming_chart(ticker, extended=False, overnight=True)
     st.subheader("Latest prices and forecast")
     try:
         with st.spinner("Checking for the latest completed bars..."):
-            regular = load_prices(False)[ticker].dropna()
+            regular = load_prices(False, quote_symbol if is_crypto else None)[quote_symbol].dropna()
     except (RuntimeError, ValueError, OSError) as exc:
         st.error(f"Price refresh failed. {exc}")
         return
     if regular.empty:
-        st.warning(f"No regular-session prices returned for {ticker}.")
+        st.warning(f"No 15-minute prices returned for {ticker}.")
         return
 
     observed = regular
@@ -246,7 +259,7 @@ def dashboard():
             st.warning("Extended-hours prices are temporarily unavailable.")
     bar_size = "15-minute"
     try:
-        minute_prices = load_minute_prices(ticker, extended)
+        minute_prices = load_minute_prices(quote_symbol, extended)
         if not minute_prices.empty and minute_prices.index[-1] >= observed.index[-1]:
             observed = minute_prices
             bar_size = "1-minute"
@@ -261,7 +274,7 @@ def dashboard():
 
     path = None
     try:
-        path, error, baseline, test_dates = analyze_path(regular, now, hours * 4)
+        path, error, baseline, test_dates = analyze_path(regular, now, hours * 4, is_crypto=is_crypto)
     except RuntimeError as exc:
         st.info(str(exc))
     else:
@@ -271,7 +284,8 @@ def dashboard():
         columns[2].metric("Improvement", f"{baseline - error:+.3f} pp")
         st.caption(f"Historical test {test_dates[0]:%b %d} to {test_dates[-1]:%b %d} · {len(test_dates)} examples · Lower error is better")
 
-    recent = observed.loc[latest.normalize():]
+    window_start = latest - pd.Timedelta(hours=24) if is_crypto else latest.normalize()
+    recent = observed.loc[window_start:]
     fig = go.Figure(go.Scatter(
         x=recent.index.tz_convert(pacific).tz_localize(None), y=recent, name=f"Observed ({bar_size})",
         mode="lines+markers", line={"color": "#22d3ee", "width": 2}, marker={"size": 4},
@@ -299,9 +313,13 @@ def dashboard():
     if path is not None:
         st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}. Newer observed prices may overlap the first part of the forecast.")
     if path is None:
-        st.caption(f"A fresh forecast appears when the model has one hour of regular-session history and the full {hours * 60}-minute projection fits before the close.")
-    with st.expander("TradingView streaming chart"):
-        show_streaming_chart(ticker, extended)
+        if is_crypto:
+            st.caption("The forecast needs a fresh completed 15-minute bar and one hour of continuous recent history.")
+        else:
+            st.caption(f"A fresh forecast appears when the model has one hour of regular-session history and the full {hours * 60}-minute projection fits before the close.")
+    if not is_crypto:
+        with st.expander("TradingView streaming chart"):
+            show_streaming_chart(ticker, extended)
 
 
 dashboard()
