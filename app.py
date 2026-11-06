@@ -40,7 +40,7 @@ def download_intraday(*, extended=False, crypto_symbol=None):
     return prices.loc[prices.index <= pd.Timestamp.now(tz=eastern)]
 
 def analyze_path(price, now, bars_ahead, *, is_crypto=False):
-    horizons = [bars_ahead]
+    horizons = list(range(4, bars_ahead + 1, 4)) if is_crypto and bars_ahead == 96 else [bars_ahead]
     session = price.index.normalize()
     groups = [0] * len(price) if is_crypto else session
     daily = price.groupby(groups)
@@ -74,8 +74,9 @@ def analyze_path(price, now, bars_ahead, *, is_crypto=False):
     model = make_pipeline(StandardScaler(), Ridge(alpha=10))
     model.fit(train[columns], train[horizons])
     actual = test[horizons].to_numpy()
-    error = 100 * abs(actual - model.predict(test[columns])).mean()
-    baseline = 100 * abs(actual).mean()
+    predicted = model.predict(test[columns])
+    error = 100 * abs(actual[:, -1] - predicted[:, -1]).mean()
+    baseline = 100 * abs(actual[:, -1]).mean()
 
     last = price.index[-1]
     forecast = None
@@ -325,7 +326,7 @@ def dashboard():
         columns[0].metric("Model error", f"{error:.3f} pp")
         columns[1].metric("Flat-price baseline error", f"{baseline:.3f} pp")
         columns[2].metric("Improvement", f"{baseline - error:+.3f} pp")
-        st.caption(f"Historical test {test_dates[0]:%b %d} to {test_dates[-1]:%b %d} · {len(test_dates)} examples · Lower error is better")
+        st.caption(f"Historical test {test_dates[0]:%b %d} to {test_dates[-1]:%b %d} · {len(test_dates)} examples · Error measured at the selected horizon")
 
     rate = 1.0
     if currency == "IDR":
@@ -375,7 +376,7 @@ def dashboard():
         st.caption("No matching headlines were found within the displayed price window. See the latest headlines below.")
     show_market_news(ticker)
     if path is not None:
-        st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}." + f" The dashed segment connects the starting price to a single {hours}-hour estimate.")
+        st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}." + (" The dashed path shows one separate estimate per hour." if hours == 24 else f" The dashed segment connects the starting price to a single {hours}-hour estimate."))
     if path is None:
         if is_crypto:
             st.caption("The forecast needs a fresh completed 15-minute bar and one hour of continuous recent history.")
