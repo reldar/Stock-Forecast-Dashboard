@@ -286,6 +286,47 @@ def show_market_summary(recent, currency, path, regular, hours, error, baseline)
     st.caption(f"{reason} This is a model-based signal. It does not account for fees, spreads, or your positions.")
 
 
+def track_forecasts(ticker, hours, regular, path, now):
+    history = st.session_state.setdefault("forecast_history", {})
+    key = (ticker, hours)
+    entries = history.setdefault(key, {})
+    anchor = regular.index[-1]
+    if path is not None and path.index[-1] > now and anchor not in entries:
+        entries[anchor] = {"start": float(regular.iloc[-1]), "path": path.copy(), "actual": None}
+        if len(entries) > 96:
+            del entries[min(entries)]
+    for entry in entries.values():
+        target = entry["path"].index[-1]
+        if entry["actual"] is None and target <= now and target in regular.index:
+            entry["actual"] = float(regular.loc[target])
+    return entries
+
+
+def show_forecast_history(entries, now, currency, rate):
+    st.subheader("Forecast history")
+    st.caption("Saved from forecasts shown in this browser session. The actual price comes from the completed 15-minute bar at the target time. Times are Los Angeles time.")
+    if not entries:
+        st.caption("No forecasts have been captured yet for this ticker and horizon.")
+        return
+    rows = []
+    for anchor in sorted(entries, reverse=True)[:12]:
+        entry = entries[anchor]
+        target = entry["path"].index[-1]
+        forecast = float(entry["path"].iloc[-1])
+        actual = entry["actual"]
+        status = "Compared" if actual is not None else ("Awaiting price bar" if target <= now else "Pending")
+        precision = 2 if forecast * rate >= 1 else 6
+        rows.append({
+            "Started": anchor.tz_convert(pacific).strftime("%b %d %I:%M %p %Z"),
+            "Target time": target.tz_convert(pacific).strftime("%b %d %I:%M %p %Z"),
+            f"Predicted ({currency})": f"{forecast * rate:,.{precision}f}",
+            f"Actual ({currency})": f"{actual * rate:,.{precision}f}" if actual is not None else "—",
+            "Absolute miss": f"{100 * abs(actual - forecast) / entry['start']:.3f} pp" if actual is not None else "—",
+            "Status": status,
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+
 @st.fragment(run_every="1m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
@@ -364,6 +405,7 @@ def dashboard():
         columns[2].metric("Improvement", f"{baseline - error:+.3f} pp")
         st.caption(f"Historical test {test_dates[0]:%b %d} to {test_dates[-1]:%b %d} · {len(test_dates)} examples · Error measured at the selected horizon")
 
+    forecast_history = track_forecasts(ticker, hours, regular, path, now)
     rate = 1.0
     if currency == "IDR":
         try:
@@ -398,6 +440,18 @@ def dashboard():
             x=projected_times, y=[regular.iloc[-1] * rate, *(path * rate)], name=f"{hours}-hour forecast",
             mode="lines+markers", line={"color": "#f59e0b", "width": 3, "dash": "dash"},
         )
+    settled = [a for a, entry in forecast_history.items()
+               if a >= recent.index[0] and entry["actual"] is not None]
+    if settled:
+        saved_anchor = max(settled)
+        saved = forecast_history[saved_anchor]
+        saved_path = saved["path"]
+        saved_times = pd.DatetimeIndex([saved_anchor, *saved_path.index]).tz_convert(pacific).tz_localize(None)
+        fig.add_scatter(
+            x=saved_times, y=[saved["start"] * rate, *(saved_path * rate)],
+            name="Last completed forecast", mode="lines+markers",
+            line={"color": "#f59e0b", "width": 2, "dash": "dot"}, opacity=0.8,
+        )
     fig.update_layout(
         title=f"{ticker} · {latest:%B %d, %Y}", yaxis_title=f"Price ({currency})",
         xaxis_title="Los Angeles time (Pacific)", hovermode="x unified", height=455,
@@ -411,6 +465,7 @@ def dashboard():
         st.caption("Hover over a diamond to see the headline at its publication time. The marker uses the last observed price at that time. Timing alone cannot establish what caused a move.")
     else:
         st.caption("No matching headlines were found within the displayed price window. See the latest headlines below.")
+    show_forecast_history(forecast_history, now, currency, rate)
     show_market_news(ticker)
     if path is not None:
         st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}." + (" The dashed path shows one separate estimate per hour." if hours == 24 else f" The dashed segment connects the starting price to a single {hours}-hour estimate."))
