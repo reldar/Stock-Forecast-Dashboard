@@ -179,6 +179,7 @@ def add_news_markers(fig, ticker, prices):
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
     ticker = controls[0].selectbox("Ticker", forecast_tickers)
+    controls[0].link_button(f"{ticker} on Yahoo Finance", f"https://finance.yahoo.com/quote/{ticker}/")
     hours = controls[1].selectbox("Forecast horizon", [1, 2], format_func=lambda h: f"{h} hour" if h == 1 else f"{h} hours")
     extended = controls[2].checkbox("Include extended hours", value=True)
     if controls[3].button("Refresh prices"):
