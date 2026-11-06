@@ -1,9 +1,11 @@
+import json
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
 import pandas_market_calendars as mcal
@@ -175,6 +177,28 @@ def add_news_markers(fig, ticker, prices):
     return marker_count
 
 
+def show_streaming_chart(ticker, extended):
+    st.subheader(f"Streaming chart · {ticker}")
+    st.caption("One-minute bars from TradingView. Availability and delay depend on the feed.")
+    symbol = ("AMEX:" if ticker == "SPY" else "NASDAQ:") + ticker
+    settings = json.dumps({
+        "autosize": True, "symbol": symbol, "interval": "1",
+        "timezone": "America/Los_Angeles", "theme": "dark", "style": "1",
+        "locale": "en", "allow_symbol_change": False,
+        "support_host": "https://www.tradingview.com",
+        "extended_hours": extended,
+    })
+    components.html(f'''
+        <div class="tradingview-widget-container" style="height:510px;width:100%">
+          <div class="tradingview-widget-container__widget" style="height:480px;width:100%"></div>
+          <div class="tradingview-widget-copyright">
+            <a href="https://www.tradingview.com/symbols/{symbol.replace(':', '-')}/" target="_blank" rel="noopener noreferrer">{ticker} chart on TradingView</a>
+          </div>
+          <script src="https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js" async>{settings}</script>
+        </div>
+    ''', height=520)
+
+
 @st.fragment(run_every="15m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
@@ -185,6 +209,8 @@ def dashboard():
     if controls[3].button("Refresh prices"):
         load_prices.clear()
         fetch_headlines.clear()
+    show_streaming_chart(ticker, extended)
+    st.subheader("15-minute forecast and news comparison")
     try:
         with st.spinner("Checking for the latest completed bars..."):
             regular = load_prices(False)[ticker].dropna()
