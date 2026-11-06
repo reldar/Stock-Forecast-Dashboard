@@ -74,7 +74,7 @@ def analyze_path(price, now, bars_ahead, *, is_crypto=False):
     model = make_pipeline(StandardScaler(), Ridge(alpha=10))
     model.fit(train[columns], train[horizons])
     actual = test[horizons].to_numpy()
-    predicted = model.predict(test[columns])
+    predicted = model.predict(test[columns]).reshape(actual.shape)
     error = 100 * abs(actual[:, -1] - predicted[:, -1]).mean()
     baseline = 100 * abs(actual[:, -1]).mean()
 
@@ -82,7 +82,7 @@ def analyze_path(price, now, bars_ahead, *, is_crypto=False):
     forecast = None
     if pd.Timedelta(0) <= now - last < step and last in features.index and fits.loc[last]:
         model.fit(samples[columns], samples[horizons])
-        returns = model.predict(features.loc[[last]])[0]
+        returns = model.predict(features.loc[[last]]).ravel()
         forecast = pd.Series(
             price.iloc[-1] * (1 + returns),
             index=[last + h * step for h in horizons],
