@@ -85,7 +85,7 @@ st.set_page_config(page_title="Stock Forecast Dashboard", page_icon="📈", layo
 st.title("Stock Forecast Dashboard")
 st.caption("15-minute market prices and experimental intraday projections")
 
-@st.cache_data(ttl=840, show_spinner=False)
+@st.cache_data(ttl=240, show_spinner=False)
 def load_prices(extended):
     return download_intraday(extended=extended)
     
@@ -199,7 +199,19 @@ def show_streaming_chart(ticker, extended):
     ''', height=520)
 
 
-@st.fragment(run_every="15m")
+@st.cache_data(ttl=55, show_spinner=False)
+def load_minute_prices(ticker, extended):
+    raw = yf.download(ticker, period="5d", interval="1m", auto_adjust=True,
+                      prepost=extended, progress=False, ignore_tz=False,
+                      multi_level_index=False, timeout=8)
+    if raw is None or raw.empty or "Close" not in raw:
+        return pd.Series(dtype=float)
+    prices = raw["Close"].dropna().sort_index()
+    prices.index = prices.index.tz_convert(eastern) + pd.Timedelta(minutes=1)
+    return prices.loc[prices.index <= pd.Timestamp.now(tz=eastern)]
+
+
+@st.fragment(run_every="1m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
     ticker = controls[0].selectbox("Ticker", forecast_tickers)
@@ -209,8 +221,8 @@ def dashboard():
     if controls[3].button("Refresh prices"):
         load_prices.clear()
         fetch_headlines.clear()
-    show_streaming_chart(ticker, extended)
-    st.subheader("15-minute forecast and news comparison")
+        load_minute_prices.clear()
+    st.subheader("Latest prices and forecast")
     try:
         with st.spinner("Checking for the latest completed bars..."):
             regular = load_prices(False)[ticker].dropna()
@@ -228,12 +240,20 @@ def dashboard():
             observed = regular.combine_first(extra).sort_index()
         except (RuntimeError, ValueError, OSError):
             st.warning("Extended-hours prices are temporarily unavailable.")
+    bar_size = "15-minute"
+    try:
+        minute_prices = load_minute_prices(ticker, extended)
+        if not minute_prices.empty and minute_prices.index[-1] >= observed.index[-1]:
+            observed = minute_prices
+            bar_size = "1-minute"
+    except (RuntimeError, ValueError, OSError):
+        pass
     now = pd.Timestamp.now(tz=eastern)
     latest = observed.index[-1]
     anchor = regular.index[-1]
     if latest.date() != now.date():
         st.info(f"No completed bars for today yet. Showing {latest:%B %d, %Y}.")
-    st.caption(f"Latest chart bar {latest.tz_convert(pacific):%b %d, %Y at %I:%M %p %Z} · Yahoo Finance · Refreshes every 15 minutes while open")
+    st.caption(f"Latest chart bar {latest.tz_convert(pacific):%b %d, %Y at %I:%M %p %Z} · Yahoo Finance {bar_size} bars · Checks every minute while open")
 
     path = None
     try:
@@ -249,13 +269,13 @@ def dashboard():
 
     recent = observed.loc[latest.normalize():]
     fig = go.Figure(go.Scatter(
-        x=recent.index.tz_convert(pacific).tz_localize(None), y=recent, name="Observed",
+        x=recent.index.tz_convert(pacific).tz_localize(None), y=recent, name=f"Observed ({bar_size})",
         mode="lines+markers", line={"color": "#2563eb"}, marker={"size": 4},
     ))
     if path is not None:
         projected_times = pd.DatetimeIndex([anchor, *path.index]).tz_convert(pacific).tz_localize(None)
         fig.add_scatter(
-            x=projected_times, y=[regular.iloc[-1], *path], name="Projected",
+            x=projected_times, y=[regular.iloc[-1], *path], name=f"{hours}-hour forecast",
             mode="lines+markers", line={"color": "#b45309", "dash": "dash"},
         )
     fig.update_layout(
@@ -271,7 +291,12 @@ def dashboard():
     else:
         st.caption("No matching headlines were found within the displayed price window. See the latest headlines below.")
     show_market_news(ticker)
+    if path is not None:
+        st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}. Newer observed prices may overlap the first part of the forecast.")
     if path is None:
         st.caption(f"A fresh forecast appears when the model has one hour of regular-session history and the full {hours * 60}-minute projection fits before the close.")
+    with st.expander("TradingView streaming chart"):
+        show_streaming_chart(ticker, extended)
+
 
 dashboard()
