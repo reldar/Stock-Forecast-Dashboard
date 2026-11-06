@@ -68,6 +68,8 @@ def analyze_path(price, now, bars_ahead, *, is_crypto=False):
     split = days[int(len(days) * 0.8)]
     train = samples.loc[samples.index + bars_ahead * step < split]
     test = samples.loc[samples.index >= split]
+    if train.empty or test.empty:
+        raise RuntimeError("Not enough training and test data for this forecast horizon.")
     columns = features.columns
     model = make_pipeline(StandardScaler(), Ridge(alpha=10))
     model.fit(train[columns], train[horizons])
@@ -258,7 +260,8 @@ def dashboard():
         controls[0].link_button(f"{ticker} on Kraken", f"https://www.kraken.com/prices/{crypto_names[ticker].lower()}")
     else:
         controls[0].link_button(f"{ticker} on Yahoo Finance", f"https://finance.yahoo.com/quote/{quote_symbol}/")
-    hours = controls[1].selectbox("Forecast horizon", [1, 2], format_func=lambda h: f"{h} hour" if h == 1 else f"{h} hours")
+    horizons = [1, 2, 24] if is_crypto else [1, 2]
+    hours = controls[1].selectbox("Forecast horizon", horizons, format_func=lambda h: f"{h} hour" if h == 1 else f"{h} hours")
     currency = controls[2].selectbox("Display currency", ["USD", "IDR"])
     if is_crypto:
         controls[2].caption("Crypto · 24/7")
@@ -343,7 +346,7 @@ def dashboard():
         prefix = "Rp " if currency == "IDR" else "$"
         st.metric(f"{hours}-hour price estimate", f"{prefix}{displayed_target:{price_format}}",
                   f"{change:+.2f}% from the forecast start")
-        st.caption(f"Target time {target_time:%I:%M %p %Z} · {hours * 60} minutes after the last completed model bar")
+        st.caption(f"Target time {target_time:%b %d at %I:%M %p %Z} · {hours} hour(s) after the last completed model bar")
 
     window_start = latest - pd.Timedelta(hours=24) if is_crypto else latest.normalize()
     recent = observed.loc[window_start:] * rate
