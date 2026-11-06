@@ -40,7 +40,7 @@ def download_intraday(*, extended=False, crypto_symbol=None):
     return prices.loc[prices.index <= pd.Timestamp.now(tz=eastern)]
 
 def analyze_path(price, now, bars_ahead, *, is_crypto=False):
-    horizons = list(range(1, bars_ahead + 1))
+    horizons = [bars_ahead] if bars_ahead == 4 else list(range(1, bars_ahead + 1))
     session = price.index.normalize()
     groups = [0] * len(price) if is_crypto else session
     daily = price.groupby(groups)
@@ -310,6 +310,15 @@ def dashboard():
         columns[2].metric("Improvement", f"{baseline - error:+.3f} pp")
         st.caption(f"Historical test {test_dates[0]:%b %d} to {test_dates[-1]:%b %d} · {len(test_dates)} examples · Lower error is better")
 
+    if hours == 1 and path is not None:
+        target_time = path.index[-1].tz_convert(pacific)
+        target_price = path.iloc[-1]
+        change = 100 * (target_price / regular.iloc[-1] - 1)
+        price_format = ",.2f" if target_price >= 1 else ",.6f"
+        st.metric("1-hour price estimate", f"${target_price:{price_format}}",
+                  f"{change:+.2f}% from the forecast start")
+        st.caption(f"Target time {target_time:%I:%M %p %Z} · One hour after the last completed model bar")
+
     window_start = latest - pd.Timedelta(hours=24) if is_crypto else latest.normalize()
     recent = observed.loc[window_start:]
     fig = go.Figure(go.Scatter(
@@ -337,7 +346,7 @@ def dashboard():
         st.caption("No matching headlines were found within the displayed price window. See the latest headlines below.")
     show_market_news(ticker)
     if path is not None:
-        st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}. Newer observed prices may overlap the first part of the forecast.")
+        st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}." + (" The dashed segment connects the starting price to a single one-hour estimate." if hours == 1 else " Newer observed prices may overlap the first part of the forecast."))
     if path is None:
         if is_crypto:
             st.caption("The forecast needs a fresh completed 15-minute bar and one hour of continuous recent history.")
