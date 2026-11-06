@@ -330,6 +330,180 @@ def show_forecast_history(entries, now, currency, rate):
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
+
+# Evidence is archived at first observation, never backdated to publication time.
+import hashlib
+import re
+import sqlite3
+from pathlib import Path
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+
+@st.cache_data(ttl=900, show_spinner=False)
+def research_feed(symbol):
+    result = []
+    for item in yf.Ticker(symbol).get_news(count=20):
+        content = item.get("content") or item
+        title = str(content.get("title") or "").strip()
+        summary = re.sub(r"<[^>]+>", " ", str(content.get("summary") or ""))[:1500]
+        link = (content.get("canonicalUrl") or {}).get("url", "") or content.get("link", "")
+        published = pd.to_datetime(content.get("pubDate"), utc=True, errors="coerce")
+        provider = (content.get("provider") or {}).get("displayName", "Yahoo feed")
+        if title and link.startswith("https://") and not pd.isna(published):
+            result.append({"title": title, "summary": summary, "url": link,
+                           "published": published.isoformat(), "provider": provider})
+    return result
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def upcoming_earnings(symbol):
+    return yf.Ticker(symbol).calendar or {}
+
+
+def evidence_store(ticker, articles, regular):
+    # Local app disk survives browser sessions, but is not durable cloud storage.
+    location = Path("research_archive.sqlite3")
+    with sqlite3.connect(location, timeout=10) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS articles (ticker TEXT, fingerprint TEXT, seen TEXT, payload TEXT, PRIMARY KEY(ticker, fingerprint))")
+        db.execute("CREATE TABLE IF NOT EXISTS prices (ticker TEXT, stamp TEXT, price REAL, PRIMARY KEY(ticker, stamp))")
+        seen = pd.Timestamp.now(tz="UTC").isoformat()
+        for item in articles:
+            fingerprint = hashlib.sha256(re.sub(r"\W+", " ", item["title"].lower()).encode()).hexdigest()
+            db.execute("INSERT OR IGNORE INTO articles VALUES (?,?,?,?)", (ticker, fingerprint, seen, json.dumps(item)))
+        db.executemany("INSERT OR IGNORE INTO prices VALUES (?,?,?)", [
+            (ticker, stamp.tz_convert("UTC").isoformat(), float(value)) for stamp, value in regular.items()])
+        rows = db.execute("SELECT seen,payload FROM articles WHERE ticker=? ORDER BY seen", (ticker,)).fetchall()
+        quotes = db.execute("SELECT stamp,price FROM prices WHERE ticker=? ORDER BY stamp", (ticker,)).fetchall()
+    records = [{**json.loads(payload), "first_seen": seen} for seen, payload in rows]
+    prices = pd.Series([x[1] for x in quotes], index=pd.to_datetime([x[0] for x in quotes], utc=True)).sort_index()
+    return records, prices
+
+
+TOPICS = [
+    ("Earnings / outlook", r"earnings|revenue|guidance|profit|results", "Watch reported results AND forward guidance against expectations. A good result can still be followed by a decline."),
+    ("Policy / regulation", r"tariff|regulat|antitrust|export|sanction|sec\b|lawsuit", "Check the official scope, effective date and affected business. Restrictions and relief can have opposite effects."),
+    ("Rates / inflation", r"inflation|federal reserve|interest rate|\bcpi\b|\bfed\b", "Compare the release with expectations and the market reaction; a scheduled release can move prices in either direction."),
+    ("Security / liquidity", r"hack|exploit|outage|liquidat|unlock|breach", "Check official incident reports, token supply changes and liquidity. Headline wording alone does not establish the size of the risk."),
+    ("Products / demand", r"launch|chip|demand|partnership|upgrade|adoption", "Look for measurable revenue, usage or demand evidence, rather than assuming an announcement will raise prices."),
+]
+
+
+def research_dataset(records, prices, hours, is_crypto):
+    groups = [0] * len(prices) if is_crypto else prices.index.tz_convert(eastern).normalize()
+    grouped = prices.groupby(groups)
+    times = prices.index.to_series().groupby(groups)
+    data = pd.DataFrame({"r15": grouped.pct_change(fill_method=None), "r60": grouped.pct_change(4, fill_method=None)})
+    data = data.loc[(times.diff() == step) & (times.diff(4) == 4 * step)].dropna()
+    horizon = pd.Timedelta(hours=hours)
+    data["target"] = prices.reindex(data.index + horizon).to_numpy() / prices.reindex(data.index).to_numpy() - 1
+    if not is_crypto and not data.empty:
+        schedule = market.schedule(start_date=data.index[0].date(), end_date=data.index[-1].date())
+        closes = schedule["market_close"].reindex(data.index.tz_convert(eastern).normalize().tz_localize(None))
+        data = data.loc[data.index + horizon <= pd.DatetimeIndex(closes)]
+    eligible = [(max(pd.Timestamp(r["first_seen"]), pd.Timestamp(r["published"])), r["title"] + " " + r["summary"]) for r in records]
+    # Empty news windows are unknown, not evidence of neutral sentiment.
+    data["text"] = [" ".join(text for seen, text in eligible if stamp - pd.Timedelta(hours=6) < seen <= stamp) for stamp in data.index]
+    return data.loc[data["text"].str.len() > 0].dropna()
+
+
+def evaluate_news_candidate(data, hours):
+    days = data.index.normalize().unique()
+    if len(days) < 15 or len(data) < 150:
+        return None
+    # Three forward tests; purge labels reaching into each test period.
+    reports = []
+    for low, high in ((0.55, 0.70), (0.70, 0.85), (0.85, 1.0)):
+        start = days[int(len(days) * low)]
+        end = days[min(int(len(days) * high), len(days) - 1)] + pd.Timedelta(days=1) if high == 1 else days[int(len(days) * high)]
+        train = data.loc[data.index + pd.Timedelta(hours=hours) < start]
+        test = data.loc[(data.index >= start) & (data.index < end)]
+        if len(train) < 60 or len(test) < 20 or train["text"].nunique() < 10:
+            return None
+        transform = ColumnTransformer([
+            ("prices", StandardScaler(), ["r15", "r60"]),
+            ("news", TfidfVectorizer(max_features=300, min_df=2, stop_words="english"), "text")])
+        candidate = make_pipeline(transform, Ridge(alpha=10, solver="lsqr"))
+        control = make_pipeline(StandardScaler(), Ridge(alpha=10))
+        candidate.fit(train, train["target"])
+        control.fit(train[["r15", "r60"]], train["target"])
+        target = test["target"]
+        reports.append({"Test starts (UTC)": str(start.date()), "Examples": len(test),
+                        "News + prices MAE (pp)": float(100 * abs(target - candidate.predict(test)).mean()),
+                        "Prices only MAE (pp)": float(100 * abs(target - control.predict(test[["r15", "r60"]])).mean()),
+                        "Flat MAE (pp)": float(100 * abs(target).mean())})
+    return pd.DataFrame(reports)
+
+
+def show_research(ticker, symbol, regular, now, hours, is_crypto, path, error, baseline):
+    st.subheader("Evidence and upcoming events")
+    st.caption("Article metadata and available publisher summaries, not full-text article reading. Topic explanations below are rules, not AI fact-checking or proven causes of price moves.")
+    articles, failures = [], []
+    try:
+        articles.extend(research_feed(symbol))
+    except Exception:
+        failures.append("Yahoo article summaries unavailable")
+    for query in NEWS_QUERIES[ticker]:
+        try:
+            articles.extend({"title": title, "summary": "", "url": url,
+                             "published": pd.Timestamp(published).isoformat(), "provider": "Google News RSS"}
+                            for published, title, url in fetch_headlines(query))
+        except Exception:
+            failures.append("A headline feed is unavailable")
+    articles = [a for a in articles if now - pd.Timedelta(days=7) <= pd.Timestamp(a["published"]) <= now]
+    dedup = {}
+    for article in articles:
+        dedup.setdefault(re.sub(r"\W+", " ", article["title"].lower()), article)
+    articles = sorted(dedup.values(), key=lambda a: pd.Timestamp(a["published"]), reverse=True)
+    if failures:
+        st.caption("; ".join(sorted(set(failures))) + ". Missing coverage is not a neutral signal.")
+    st.write(f"{len(articles)} recent feed items found. Relevance is feed-selected and may be imperfect; syndicated stories are not independent confirmation.")
+    if path is not None and error is not None:
+        move = 100 * (path.iloc[-1] / regular.iloc[-1] - 1)
+        st.write(f"Price evidence: {hours}-hour estimate {move:+.2f}%; historical average miss {error:.2f} percentage points. " +
+                 ("The price model did not beat the flat baseline." if error >= baseline else "The price model beat the flat baseline on its displayed test; that does not establish profitable trading."))
+    for label, pattern, explanation in TOPICS:
+        matches = [a for a in articles if re.search(pattern, a["title"] + " " + a["summary"], re.I)]
+        if matches:
+            with st.expander(f"{label} · {len(matches)} related feed items"):
+                st.write(explanation)
+                for item in matches[:3]:
+                    st.link_button(item["title"], item["url"])
+                    st.caption(f"{item['provider']} · {pd.Timestamp(item['published']).tz_convert(pacific):%b %d %I:%M %p %Z}")
+                    if item["summary"]:
+                        st.text("Publisher summary excerpt: " + " ".join(item["summary"].split()[:24]))
+    if not articles:
+        st.info("No recent evidence retrieved. Do not interpret missing news as low risk.")
+    if ticker in {"NVDA", "GOOGL", "MU"}:
+        try:
+            calendar = upcoming_earnings(symbol)
+            dates = [pd.Timestamp(d).date() for d in calendar.get("Earnings Date", [])]
+            dates = sorted(d for d in dates if d >= now.tz_convert(pacific).date())
+            st.write("Upcoming earnings (Yahoo estimate; verify with company): " + (", ".join(map(str, dates)) if dates else "No future date returned."))
+            st.link_button("Check earnings source", f"https://finance.yahoo.com/quote/{symbol}/calendar/")
+        except Exception:
+            st.caption("Earnings calendar unavailable; this does not mean no event is scheduled.")
+    else:
+        st.caption("No verified automated event calendar for this asset. Headlines may mention future events, but their dates are not extracted or confirmed.")
+    st.caption("Event scenarios: stronger-than-expected results or easing restrictions may support prices; weaker results or tighter restrictions may pressure them. These are conditional possibilities, not forecasts of an announcement's outcome.")
+    with st.expander("Research archive and news-model test"):
+        st.caption("Collects this selected asset while the app is open. First-seen times prevent today's articles from leaking into older forecasts. App-local storage can disappear on redeploy/restart; download a backup. This is not a permanent database or a background collector.")
+        try:
+            records, prices = evidence_store(ticker, articles, regular)
+            st.write(f"Archived {len(records)} items and {len(prices)} completed price bars for {ticker}.")
+            bundle = {"ticker": ticker, "articles": records, "prices": [{"time": t.isoformat(), "close_usd": float(p)} for t, p in prices.items()]}
+            st.download_button("Download research data (JSON)", json.dumps(bundle, indent=2), file_name=f"{ticker}_research.json", mime="application/json", key=f"research_export_{ticker}")
+            dataset = research_dataset(records, prices, hours, is_crypto)
+            st.caption(f"Usable news-and-price examples: {len(dataset)} across {dataset.index.normalize().nunique()} UTC days. The experiment requires at least 15 days, 150 examples and adequate variety in each training window.")
+            if st.button("Evaluate news + prices", key=f"research_test_{ticker}_{hours}"):
+                result = evaluate_news_candidate(dataset, hours)
+                if result is None:
+                    st.info("Not enough archived evidence yet. The amber forecast remains the price-only model. No accuracy improvement has been established.")
+                else:
+                    st.dataframe(result, hide_index=True)
+                    st.caption("Three chronological tests, with training targets purged before each test. Text vocabulary and scaling fit on training only. Same examples for all models; examples can overlap and are not independent. Research only: results do not automatically replace the amber model, and fees/spreads are excluded.")
+        except Exception as exc:
+            st.warning(f"Research archive/test unavailable ({type(exc).__name__}). The price chart is still available.")
+
+
 @st.fragment(run_every="1m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
@@ -469,6 +643,7 @@ def dashboard():
     else:
         st.caption("No matching headlines were found within the displayed price window. See the latest headlines below.")
     show_forecast_history(forecast_history, now, currency, rate)
+    show_research(ticker, quote_symbol, regular, now, hours, is_crypto, path, error, baseline)
     show_market_news(ticker)
     if path is not None:
         st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}." + (" The dashed path shows one separate estimate per hour." if hours == 24 else f" The dashed segment connects the starting price to a single {hours}-hour estimate."))
