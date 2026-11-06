@@ -220,13 +220,32 @@ def load_minute_prices(ticker, extended):
     return prices.loc[prices.index <= pd.Timestamp.now(tz=eastern)]
 
 
+@st.cache_data(ttl=55, show_spinner=False)
+def load_kraken_prices(ticker, interval):
+    params = urlencode({"pair": f"{ticker}USD", "interval": interval})
+    with urlopen(f"https://api.kraken.com/0/public/OHLC?{params}", timeout=8) as response:
+        payload = json.load(response)
+    if payload.get("error"):
+        raise RuntimeError(f"Kraken returned no usable bars for {ticker}/USD.")
+    rows = next((value for key, value in payload.get("result", {}).items() if key != "last"), [])
+    if not rows:
+        return pd.Series(dtype=float)
+    ends = pd.to_datetime([row[0] for row in rows], unit="s", utc=True).tz_convert(eastern)
+    ends += pd.Timedelta(minutes=interval)
+    prices = pd.Series([float(row[4]) for row in rows], index=ends).sort_index()
+    return prices.loc[prices.index <= pd.Timestamp.now(tz=eastern)]
+
+
 @st.fragment(run_every="1m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
     ticker = controls[0].selectbox("Ticker", [*forecast_tickers, *crypto_names])
     is_crypto = ticker in crypto_names
     quote_symbol = f"{ticker}-USD" if is_crypto else ticker
-    controls[0].link_button(f"{ticker} on Yahoo Finance", f"https://finance.yahoo.com/quote/{quote_symbol}/")
+    if ticker in {"HYPE", "ZEREBRO"}:
+        controls[0].link_button(f"{ticker} on Kraken", f"https://www.kraken.com/prices/{crypto_names[ticker].lower()}")
+    else:
+        controls[0].link_button(f"{ticker} on Yahoo Finance", f"https://finance.yahoo.com/quote/{quote_symbol}/")
     hours = controls[1].selectbox("Forecast horizon", [1, 2], format_func=lambda h: f"{h} hour" if h == 1 else f"{h} hours")
     if is_crypto:
         controls[2].caption("Crypto · 24/7 · USD")
@@ -235,16 +254,22 @@ def dashboard():
         load_prices.clear()
         fetch_headlines.clear()
         load_minute_prices.clear()
+        load_kraken_prices.clear()
     if not is_crypto:
         with st.expander(f"Overnight market · {ticker}"):
             st.caption("Blue Ocean ATS overnight prices. The amber model uses regular-session data.")
             show_streaming_chart(ticker, extended=False, overnight=True)
     st.subheader("Latest prices and forecast")
+    source = "Yahoo Finance"
     try:
         with st.spinner("Checking for the latest completed bars..."):
-            regular = load_prices(False, quote_symbol if is_crypto else None)[quote_symbol].dropna()
+            if ticker in {"HYPE", "ZEREBRO"}:
+                source = "Kraken"
+                regular = load_kraken_prices(ticker, 15)
+            else:
+                regular = load_prices(False, quote_symbol if is_crypto else None)[quote_symbol].dropna()
     except (RuntimeError, ValueError, OSError) as exc:
-        st.error(f"Price refresh failed. {exc}")
+        st.error(f"{source} price refresh failed. {exc}")
         return
     if regular.empty:
         st.warning(f"No 15-minute prices returned for {ticker}.")
@@ -259,7 +284,8 @@ def dashboard():
             st.warning("Extended-hours prices are temporarily unavailable.")
     bar_size = "15-minute"
     try:
-        minute_prices = load_minute_prices(quote_symbol, extended)
+        minute_prices = (load_kraken_prices(ticker, 1) if source == "Kraken"
+                         else load_minute_prices(quote_symbol, extended))
         if not minute_prices.empty and minute_prices.index[-1] >= observed.index[-1]:
             observed = minute_prices
             bar_size = "1-minute"
@@ -270,7 +296,7 @@ def dashboard():
     anchor = regular.index[-1]
     if latest.date() != now.date():
         st.info(f"No completed bars for today yet. Showing {latest:%B %d, %Y}.")
-    st.caption(f"Latest chart bar {latest.tz_convert(pacific):%b %d, %Y at %I:%M %p %Z} · Yahoo Finance {bar_size} bars · Checks every minute while open")
+    st.caption(f"Latest chart bar {latest.tz_convert(pacific):%b %d, %Y at %I:%M %p %Z} · {source} {bar_size} bars · Checks every minute while open")
 
     path = None
     try:
