@@ -251,6 +251,41 @@ def load_idr_rate():
     return float(closes.iloc[-1]), closes.index[-1].date()
 
 
+def show_market_summary(recent, currency, path, regular, hours, error, baseline):
+    st.subheader("Market summary")
+    window = recent.loc[recent.index[-1] - pd.Timedelta(hours=4):]
+    if len(window) >= 4:
+        prefix = "Rp " if currency == "IDR" else "USD "
+        low, high = window.min(), window.max()
+        precision = 2 if low >= 10 else 6
+        levels = st.columns(2)
+        levels[0].metric("Support area", f"{prefix}{low:,.{precision}f}")
+        levels[1].metric("Resistance area", f"{prefix}{high:,.{precision}f}")
+        st.caption("Support is an area where a decline may slow. Resistance is an area where a rally may stall. These estimates use the lowest and highest observed bar closes over up to four hours on this chart.")
+    else:
+        st.caption("Too few recent prices to estimate support and resistance.")
+
+    if path is None:
+        st.markdown("**Wait · No fresh forecast**")
+        return
+
+    change = 100 * (path.iloc[-1] / regular.iloc[-1] - 1)
+    if error >= baseline:
+        signal = "Hold / wait"
+        reason = "The model did not beat the no-change guess in its historical test."
+    elif abs(change) <= error:
+        signal = "Hold / wait"
+        reason = "The estimated move is within the model’s average historical miss."
+    elif change > 0:
+        signal = "Potential buy setup"
+        reason = "The model beat the no-change guess, and the projected gain exceeds its average historical miss."
+    else:
+        signal = "Potential sell setup"
+        reason = "The model beat the no-change guess, and the projected decline exceeds its average historical miss."
+    st.markdown(f"**{signal}** · {hours}-hour forecast: **{change:+.2f}%** from the model’s starting price.")
+    st.caption(f"{reason} This is a model-based signal. It does not account for fees, spreads, or your positions.")
+
+
 @st.fragment(run_every="1m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
@@ -317,6 +352,7 @@ def dashboard():
     st.caption(f"Latest chart bar {latest.tz_convert(pacific):%b %d, %Y at %I:%M %p %Z} · {source} {bar_size} bars · Checks every minute while open")
 
     path = None
+    error = baseline = None
     try:
         path, error, baseline, test_dates = analyze_path(regular, now, hours * 4, is_crypto=is_crypto)
     except RuntimeError as exc:
@@ -351,6 +387,7 @@ def dashboard():
 
     window_start = latest - pd.Timedelta(hours=24) if is_crypto else latest.normalize()
     recent = observed.loc[window_start:] * rate
+    show_market_summary(recent, currency, path, regular, hours, error, baseline)
     fig = go.Figure(go.Scatter(
         x=recent.index.tz_convert(pacific).tz_localize(None), y=recent, name=f"Observed ({bar_size})",
         mode="lines+markers", line={"color": "#22d3ee", "width": 2}, marker={"size": 4},
