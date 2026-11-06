@@ -40,7 +40,7 @@ def download_intraday(*, extended=False, crypto_symbol=None):
     return prices.loc[prices.index <= pd.Timestamp.now(tz=eastern)]
 
 def analyze_path(price, now, bars_ahead, *, is_crypto=False):
-    horizons = [bars_ahead] if bars_ahead == 4 else list(range(1, bars_ahead + 1))
+    horizons = [bars_ahead]
     session = price.index.normalize()
     groups = [0] * len(price) if is_crypto else session
     daily = price.groupby(groups)
@@ -334,16 +334,16 @@ def dashboard():
         else:
             st.caption(f"Conversion: 1 USD ≈ Rp {rate:,.2f} ({rate_date:%b %d}, Yahoo Finance). The same rate is applied to the entire chart.")
 
-    if hours == 1 and path is not None:
+    if path is not None:
         target_time = path.index[-1].tz_convert(pacific)
         target_price = path.iloc[-1]
         change = 100 * (target_price / regular.iloc[-1] - 1)
         displayed_target = target_price * rate
         price_format = ",.2f" if displayed_target >= 1 else ",.6f"
         prefix = "Rp " if currency == "IDR" else "$"
-        st.metric("1-hour price estimate", f"{prefix}{displayed_target:{price_format}}",
+        st.metric(f"{hours}-hour price estimate", f"{prefix}{displayed_target:{price_format}}",
                   f"{change:+.2f}% from the forecast start")
-        st.caption(f"Target time {target_time:%I:%M %p %Z} · One hour after the last completed model bar")
+        st.caption(f"Target time {target_time:%I:%M %p %Z} · {hours * 60} minutes after the last completed model bar")
 
     window_start = latest - pd.Timedelta(hours=24) if is_crypto else latest.normalize()
     recent = observed.loc[window_start:] * rate
@@ -372,7 +372,7 @@ def dashboard():
         st.caption("No matching headlines were found within the displayed price window. See the latest headlines below.")
     show_market_news(ticker)
     if path is not None:
-        st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}." + (" The dashed segment connects the starting price to a single one-hour estimate." if hours == 1 else " Newer observed prices may overlap the first part of the forecast."))
+        st.caption(f"Forecast starts at the completed 15-minute bar at {anchor.tz_convert(pacific):%I:%M %p %Z}." + f" The dashed segment connects the starting price to a single {hours}-hour estimate.")
     if path is None:
         if is_crypto:
             st.caption("The forecast needs a fresh completed 15-minute bar and one hour of continuous recent history.")
