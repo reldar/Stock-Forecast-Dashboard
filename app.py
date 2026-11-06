@@ -1,4 +1,6 @@
 import json
+import os
+from contextlib import closing
 from datetime import timedelta
 from zoneinfo import ZoneInfo
 
@@ -287,32 +289,53 @@ def show_market_summary(recent, currency, path, regular, hours, error, baseline)
 
 
 def track_forecasts(ticker, hours, regular, path, now):
-    history = st.session_state.setdefault("forecast_history", {})
-    key = (ticker, hours)
-    entries = history.setdefault(key, {})
-    anchor = regular.index[-1]
-    if path is not None and path.index[-1] > now and anchor not in entries:
-        entries[anchor] = {"start": float(regular.iloc[-1]), "path": path.copy(), "actual": None}
-        if len(entries) > 192:
-            del entries[min(entries)]
-    for entry in entries.values():
-        target = entry["path"].index[-1]
-        if entry["actual"] is None and target <= now and target in regular.index:
-            entry["actual"] = float(regular.loc[target])
+    location = Path(os.environ.get("FORECAST_HISTORY_DB", "research_archive.sqlite3"))
+    with closing(sqlite3.connect(location, timeout=10)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS forecast_history (
+                id INTEGER PRIMARY KEY, ticker TEXT NOT NULL, hours INTEGER NOT NULL,
+                anchor TEXT NOT NULL, start REAL NOT NULL, path TEXT NOT NULL, actual REAL,
+                UNIQUE (ticker, hours, anchor)
+            )
+        """)
+        anchor = regular.index[-1]
+        if path is not None and path.index[-1] > now:
+            points = [(stamp.isoformat(), float(price)) for stamp, price in path.items()]
+            db.execute("""
+                INSERT OR IGNORE INTO forecast_history (ticker, hours, anchor, start, path)
+                VALUES (?, ?, ?, ?, ?)
+            """, (ticker, hours, anchor.tz_convert("UTC").isoformat(),
+                  float(regular.iloc[-1]), json.dumps(points)))
+            db.execute("""
+                DELETE FROM forecast_history WHERE id IN (
+                    SELECT id FROM forecast_history ORDER BY id DESC LIMIT -1 OFFSET 10
+                )
+            """)
+
+        entries = {}
+        for row_id, saved_hours, stamp, start, payload, actual in db.execute("""
+            SELECT id, hours, anchor, start, path, actual FROM forecast_history WHERE ticker = ?
+        """, (ticker,)).fetchall():
+            times, prices = zip(*json.loads(payload))
+            saved_path = pd.Series(prices, index=pd.to_datetime(times, utc=True))
+            target = saved_path.index[-1]
+            if actual is None and target <= now and target in regular.index:
+                actual = float(regular.loc[target])
+                db.execute("UPDATE forecast_history SET actual = ? WHERE id = ?", (actual, row_id))
+            if saved_hours == hours:
+                entries[pd.Timestamp(stamp)] = {"start": start, "path": saved_path, "actual": actual}
     return entries
 
 
 def show_forecast_history(entries, now, currency, rate):
     st.subheader("Forecast history")
-    st.caption("Saved from forecasts shown in this browser session. The actual price comes from the completed 15-minute bar at the target time. Times are Los Angeles time.")
+    st.caption("Showing this ticker and horizon from the 10 newest forecasts saved across the dashboard. Actual prices use the completed 15-minute bar at the target time. Times are Los Angeles time.")
     if not entries:
         st.caption("No forecasts have been captured yet for this ticker and horizon.")
         return
     rows = []
-    newest = sorted(entries, reverse=True)
-    pending = [a for a in newest if entries[a]["path"].index[-1] > now]
-    expired = [a for a in newest if entries[a]["path"].index[-1] <= now]
-    for anchor in expired[:12] + pending[:6]:
+    for anchor in sorted(entries, reverse=True):
         entry = entries[anchor]
         target = entry["path"].index[-1]
         forecast = float(entry["path"].iloc[-1])
@@ -582,7 +605,11 @@ def dashboard():
         columns[2].metric("Improvement", f"{baseline - error:+.3f} pp")
         st.caption(f"Historical test {test_dates[0]:%b %d} to {test_dates[-1]:%b %d} · {len(test_dates)} examples · Error measured at the selected horizon")
 
-    forecast_history = track_forecasts(ticker, hours, regular, path, now)
+    try:
+        forecast_history = track_forecasts(ticker, hours, regular, path, now)
+    except sqlite3.Error:
+        forecast_history = {}
+        st.warning("Forecast history is temporarily unavailable. Check the forecast database path and permissions.")
     rate = 1.0
     if currency == "IDR":
         try:
