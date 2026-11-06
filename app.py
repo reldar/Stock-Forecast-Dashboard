@@ -154,7 +154,7 @@ def show_market_news(ticker):
                 st.link_button(title, url)
                 st.caption(f"{local_time:%b %d at %I:%M %p %Z}")
                 
-def add_news_markers(fig, ticker, prices):
+def add_news_markers(fig, ticker, prices, currency):
     colors = {"Company or market": "#22c55e", "Politics and policy": "#d946ef"}
     marker_count = 0
     seen = set()
@@ -179,7 +179,7 @@ def add_news_markers(fig, ticker, prices):
             fig.add_scatter(
                 x=times, y=levels, text=titles, name=category, mode="markers",
                 marker={"symbol": "diamond", "size": 11, "color": color},
-                hovertemplate="%{text}<br>Previous observed bar: $%{y:.2f}<extra>%{fullData.name}</extra>",
+                hovertemplate="%{text}<br>Previous observed bar: %{y:,.6g} " + currency + "<extra>%{fullData.name}</extra>",
             )
             marker_count += len(times)
     return marker_count
@@ -236,6 +236,18 @@ def load_kraken_prices(ticker, interval):
     return prices.loc[prices.index <= pd.Timestamp.now(tz=eastern)]
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def load_idr_rate():
+    quotes = yf.download("IDR=X", period="5d", interval="1d", progress=False,
+                         auto_adjust=False, multi_level_index=False, timeout=8)
+    if quotes is None or quotes.empty or "Close" not in quotes:
+        raise RuntimeError("USD/IDR rate unavailable.")
+    closes = quotes["Close"].dropna().sort_index()
+    if closes.empty or not 0 < closes.iloc[-1] < float("inf"):
+        raise RuntimeError("USD/IDR rate unavailable.")
+    return float(closes.iloc[-1]), closes.index[-1].date()
+
+
 @st.fragment(run_every="1m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
@@ -247,14 +259,16 @@ def dashboard():
     else:
         controls[0].link_button(f"{ticker} on Yahoo Finance", f"https://finance.yahoo.com/quote/{quote_symbol}/")
     hours = controls[1].selectbox("Forecast horizon", [1, 2], format_func=lambda h: f"{h} hour" if h == 1 else f"{h} hours")
+    currency = controls[2].selectbox("Display currency", ["USD", "IDR"])
     if is_crypto:
-        controls[2].caption("Crypto · 24/7 · USD")
+        controls[2].caption("Crypto · 24/7")
     extended = not is_crypto and controls[2].checkbox("Include extended hours", value=True)
     if controls[3].button("Refresh prices"):
         load_prices.clear()
         fetch_headlines.clear()
         load_minute_prices.clear()
         load_kraken_prices.clear()
+        load_idr_rate.clear()
     if not is_crypto:
         with st.expander(f"Overnight market · {ticker}"):
             st.caption("Blue Ocean ATS overnight prices. The amber model uses regular-session data.")
@@ -310,17 +324,29 @@ def dashboard():
         columns[2].metric("Improvement", f"{baseline - error:+.3f} pp")
         st.caption(f"Historical test {test_dates[0]:%b %d} to {test_dates[-1]:%b %d} · {len(test_dates)} examples · Lower error is better")
 
+    rate = 1.0
+    if currency == "IDR":
+        try:
+            rate, rate_date = load_idr_rate()
+        except (RuntimeError, ValueError, OSError):
+            st.warning("USD/IDR rate unavailable. Showing USD prices.")
+            currency = "USD"
+        else:
+            st.caption(f"Conversion: 1 USD ≈ Rp {rate:,.2f} ({rate_date:%b %d}, Yahoo Finance). The same rate is applied to the entire chart.")
+
     if hours == 1 and path is not None:
         target_time = path.index[-1].tz_convert(pacific)
         target_price = path.iloc[-1]
         change = 100 * (target_price / regular.iloc[-1] - 1)
-        price_format = ",.2f" if target_price >= 1 else ",.6f"
-        st.metric("1-hour price estimate", f"${target_price:{price_format}}",
+        displayed_target = target_price * rate
+        price_format = ",.2f" if displayed_target >= 1 else ",.6f"
+        prefix = "Rp " if currency == "IDR" else "$"
+        st.metric("1-hour price estimate", f"{prefix}{displayed_target:{price_format}}",
                   f"{change:+.2f}% from the forecast start")
         st.caption(f"Target time {target_time:%I:%M %p %Z} · One hour after the last completed model bar")
 
     window_start = latest - pd.Timedelta(hours=24) if is_crypto else latest.normalize()
-    recent = observed.loc[window_start:]
+    recent = observed.loc[window_start:] * rate
     fig = go.Figure(go.Scatter(
         x=recent.index.tz_convert(pacific).tz_localize(None), y=recent, name=f"Observed ({bar_size})",
         mode="lines+markers", line={"color": "#22d3ee", "width": 2}, marker={"size": 4},
@@ -328,16 +354,16 @@ def dashboard():
     if path is not None:
         projected_times = pd.DatetimeIndex([anchor, *path.index]).tz_convert(pacific).tz_localize(None)
         fig.add_scatter(
-            x=projected_times, y=[regular.iloc[-1], *path], name=f"{hours}-hour forecast",
+            x=projected_times, y=[regular.iloc[-1] * rate, *(path * rate)], name=f"{hours}-hour forecast",
             mode="lines+markers", line={"color": "#f59e0b", "width": 3, "dash": "dash"},
         )
     fig.update_layout(
-        title=f"{ticker} · {latest:%B %d, %Y}", yaxis_title="Price (USD)",
+        title=f"{ticker} · {latest:%B %d, %Y}", yaxis_title=f"Price ({currency})",
         xaxis_title="Los Angeles time (Pacific)", hovermode="x unified", height=455,
         legend={"orientation": "h", "y": 1.10},
     )
     fig.update_xaxes(tickformat="%I:%M %p")
-    marker_count = add_news_markers(fig, ticker, recent)
+    marker_count = add_news_markers(fig, ticker, recent, currency)
     st.plotly_chart(fig, width="stretch")
     st.markdown(":blue[**Solid cyan**] · Observed prices &nbsp;&nbsp; :orange[**Dashed amber**] · Forecast")
     if marker_count:
