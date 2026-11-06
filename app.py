@@ -86,7 +86,65 @@ st.caption("15-minute market prices and experimental intraday projections")
 @st.cache_data(ttl=840, show_spinner=False)
 def load_prices(extended):
     return download_intraday(extended=extended)
+    
+from email.utils import parsedate_to_datetime
+from urllib.parse import urlencode
+from urllib.request import urlopen
+from xml.etree import ElementTree as ET
 
+NEWS_QUERIES = {
+    "NVDA": ("Nvidia", "Nvidia chip export controls tariffs"),
+    "GOOGL": ("Alphabet Google", "Google antitrust regulation"),
+    "MU": ("Micron Technology", "Micron chip tariffs export controls"),
+    "SPY": ("S&P 500", "US stocks Federal Reserve tariffs government policy"),
+}
+
+@st.cache_data(ttl=240, show_spinner=False)
+def fetch_headlines(query):
+    params = urlencode({
+        "q": query,
+        "hl": "en-US",
+        "gl": "US",
+        "ceid": "US:en",
+    })
+    with urlopen(f"https://news.google.com/rss/search?{params}", timeout=8) as response:
+        feed = ET.fromstring(response.read())
+
+    headlines = []
+    for item in feed.findall("./channel/item"):
+        title = item.findtext("title", "").strip()
+        url = item.findtext("link", "").strip()
+        try:
+            published = parsedate_to_datetime(item.findtext("pubDate", ""))
+        except (TypeError, ValueError):
+            continue
+        if title and url.startswith("https://news.google.com/") and published.tzinfo:
+            headlines.append((published, title, url))
+
+    return sorted(headlines, key=lambda item: item[0], reverse=True)[:3]
+
+
+def show_market_news(ticker):
+    st.subheader(f"Market news · {ticker}")
+    pacific = ZoneInfo("America/Los_Angeles")
+
+    for column, heading, query in zip(
+        st.columns(2), ("Company or market", "Politics and policy"), NEWS_QUERIES[ticker]
+    ):
+        with column:
+            st.markdown(f"**{heading}**")
+            try:
+                headlines = fetch_headlines(query)
+            except (OSError, ET.ParseError):
+                st.caption("News feed unavailable. Try again on the next refresh.")
+                continue
+            if not headlines:
+                st.caption("No headlines returned.")
+            for published, title, url in headlines:
+                local_time = published.astimezone(pacific)
+                st.link_button(title, url)
+                st.caption(f"{local_time:%b %d at %I:%M %p %Z}")
+                
 @st.fragment(run_every="15m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
@@ -149,6 +207,7 @@ def dashboard():
     )
     fig.update_xaxes(tickformat="%I:%M %p")
     st.plotly_chart(fig, width="stretch")
+    show_market_news(ticker)
     if path is None:
         st.caption(f"A fresh forecast appears when the model has one hour of regular-session history and the full {hours * 60}-minute projection fits before the close.")
 
