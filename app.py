@@ -121,7 +121,7 @@ def fetch_headlines(query):
         if title and url.startswith("https://news.google.com/") and published.tzinfo:
             headlines.append((published, title, url))
 
-    return sorted(headlines, key=lambda item: item[0], reverse=True)[:3]
+    return sorted(headlines, key=lambda item: item[0], reverse=True)[:25]
 
 
 def show_market_news(ticker):
@@ -139,11 +139,42 @@ def show_market_news(ticker):
                 continue
             if not headlines:
                 st.caption("No headlines returned.")
-            for published, title, url in headlines:
+            for published, title, url in headlines[:3]:
                 local_time = published.astimezone(pacific)
                 st.link_button(title, url)
                 st.caption(f"{local_time:%b %d at %I:%M %p %Z}")
                 
+def add_news_markers(fig, ticker, prices):
+    colors = {"Company or market": "#22c55e", "Politics and policy": "#d946ef"}
+    marker_count = 0
+    seen = set()
+    for (category, color), query in zip(colors.items(), NEWS_QUERIES[ticker]):
+        try:
+            headlines = fetch_headlines(query)
+        except (OSError, ET.ParseError):
+            continue
+        times, levels, titles = [], [], []
+        for published, title, url in headlines:
+            published = pd.Timestamp(published)
+            if url in seen or not prices.index[0] <= published <= prices.index[-1]:
+                continue
+            seen.add(url)
+            times.append(published.tz_convert(pacific).tz_localize(None))
+            bar = prices.index.searchsorted(published, side="right") - 1
+            levels.append(prices.iloc[bar])
+            titles.append(title)
+            if len(times) == 5:
+                break
+        if times:
+            fig.add_scatter(
+                x=times, y=levels, text=titles, name=category, mode="markers",
+                marker={"symbol": "diamond", "size": 11, "color": color},
+                hovertemplate="%{text}<br>Previous observed bar: $%{y:.2f}<extra>%{fullData.name}</extra>",
+            )
+            marker_count += len(times)
+    return marker_count
+
+
 @st.fragment(run_every="15m")
 def dashboard():
     controls = st.columns([2, 2, 2, 1])
@@ -152,6 +183,7 @@ def dashboard():
     extended = controls[2].checkbox("Include extended hours", value=True)
     if controls[3].button("Refresh prices"):
         load_prices.clear()
+        fetch_headlines.clear()
     try:
         with st.spinner("Checking for the latest completed bars..."):
             regular = load_prices(False)[ticker].dropna()
@@ -205,7 +237,12 @@ def dashboard():
         legend={"orientation": "h", "y": 1.10},
     )
     fig.update_xaxes(tickformat="%I:%M %p")
+    marker_count = add_news_markers(fig, ticker, recent)
     st.plotly_chart(fig, width="stretch")
+    if marker_count:
+        st.caption("Hover over a diamond to see the headline at its publication time. The marker uses the last observed price at that time. Timing alone cannot establish what caused a move.")
+    else:
+        st.caption("No matching headlines were found within the displayed price window. See the latest headlines below.")
     show_market_news(ticker)
     if path is None:
         st.caption(f"A fresh forecast appears when the model has one hour of regular-session history and the full {hours * 60}-minute projection fits before the close.")
