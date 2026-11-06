@@ -270,13 +270,13 @@ def dashboard():
     recent = observed.loc[latest.normalize():]
     fig = go.Figure(go.Scatter(
         x=recent.index.tz_convert(pacific).tz_localize(None), y=recent, name=f"Observed ({bar_size})",
-        mode="lines+markers", line={"color": "#2563eb"}, marker={"size": 4},
+        mode="lines+markers", line={"color": "#22d3ee", "width": 2}, marker={"size": 4},
     ))
     if path is not None:
         projected_times = pd.DatetimeIndex([anchor, *path.index]).tz_convert(pacific).tz_localize(None)
         fig.add_scatter(
             x=projected_times, y=[regular.iloc[-1], *path], name=f"{hours}-hour forecast",
-            mode="lines+markers", line={"color": "#b45309", "dash": "dash"},
+            mode="lines+markers", line={"color": "#f59e0b", "width": 3, "dash": "dash"},
         )
     fig.update_layout(
         title=f"{ticker} · {latest:%B %d, %Y}", yaxis_title="Price (USD)",
@@ -286,6 +286,7 @@ def dashboard():
     fig.update_xaxes(tickformat="%I:%M %p")
     marker_count = add_news_markers(fig, ticker, recent)
     st.plotly_chart(fig, width="stretch")
+    st.markdown(":blue[**Solid cyan**] · Observed prices &nbsp;&nbsp; :orange[**Dashed amber**] · Forecast")
     if marker_count:
         st.caption("Hover over a diamond to see the headline at its publication time. The marker uses the last observed price at that time. Timing alone cannot establish what caused a move.")
     else:
