@@ -13,7 +13,7 @@ from sklearn.preprocessing import StandardScaler
 
 forecast_tickers = ["NVDA", "GOOGL", "MU", "SPY"]
 eastern = ZoneInfo("America/New_York")
-corvallis = ZoneInfo("America/Los_Angeles")
+pacific = ZoneInfo("America/Los_Angeles")
 step = pd.Timedelta(minutes=15)
 
 market = mcal.get_calendar("NYSE")
@@ -126,7 +126,6 @@ def fetch_headlines(query):
 
 def show_market_news(ticker):
     st.subheader(f"Market news · {ticker}")
-    pacific = ZoneInfo("America/Los_Angeles")
 
     for column, heading, query in zip(
         st.columns(2), ("Company or market", "Politics and policy"), NEWS_QUERIES[ticker]
@@ -175,7 +174,7 @@ def dashboard():
     anchor = regular.index[-1]
     if latest.date() != now.date():
         st.info(f"No completed bars for today yet. Showing {latest:%B %d, %Y}.")
-    st.caption(f"Latest chart bar {latest:%b %d, %Y at %I:%M %p} Eastern · Yahoo Finance · Refreshes every 15 minutes while open")
+    st.caption(f"Latest chart bar {latest.tz_convert(pacific):%b %d, %Y at %I:%M %p %Z} · Yahoo Finance · Refreshes every 15 minutes while open")
 
     path = None
     try:
@@ -191,18 +190,18 @@ def dashboard():
 
     recent = observed.loc[latest.normalize():]
     fig = go.Figure(go.Scatter(
-        x=recent.index.tz_localize(None), y=recent, name="Observed",
+        x=recent.index.tz_convert(pacific).tz_localize(None), y=recent, name="Observed",
         mode="lines+markers", line={"color": "#2563eb"}, marker={"size": 4},
     ))
     if path is not None:
-        projected_times = pd.DatetimeIndex([anchor, *path.index]).tz_localize(None)
+        projected_times = pd.DatetimeIndex([anchor, *path.index]).tz_convert(pacific).tz_localize(None)
         fig.add_scatter(
             x=projected_times, y=[regular.iloc[-1], *path], name="Projected",
             mode="lines+markers", line={"color": "#b45309", "dash": "dash"},
         )
     fig.update_layout(
         title=f"{ticker} · {latest:%B %d, %Y}", yaxis_title="Price (USD)",
-        xaxis_title="Eastern time", hovermode="x unified", height=455,
+        xaxis_title="Los Angeles time (Pacific)", hovermode="x unified", height=455,
         legend={"orientation": "h", "y": 1.10},
     )
     fig.update_xaxes(tickformat="%I:%M %p")
