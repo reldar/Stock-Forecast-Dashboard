@@ -293,7 +293,7 @@ def track_forecasts(ticker, hours, regular, path, now):
     anchor = regular.index[-1]
     if path is not None and path.index[-1] > now and anchor not in entries:
         entries[anchor] = {"start": float(regular.iloc[-1]), "path": path.copy(), "actual": None}
-        if len(entries) > 96:
+        if len(entries) > 192:
             del entries[min(entries)]
     for entry in entries.values():
         target = entry["path"].index[-1]
@@ -309,7 +309,10 @@ def show_forecast_history(entries, now, currency, rate):
         st.caption("No forecasts have been captured yet for this ticker and horizon.")
         return
     rows = []
-    for anchor in sorted(entries, reverse=True)[:12]:
+    newest = sorted(entries, reverse=True)
+    pending = [a for a in newest if entries[a]["path"].index[-1] > now]
+    expired = [a for a in newest if entries[a]["path"].index[-1] <= now]
+    for anchor in expired[:12] + pending[:6]:
         entry = entries[anchor]
         target = entry["path"].index[-1]
         forecast = float(entry["path"].iloc[-1])
@@ -441,7 +444,7 @@ def dashboard():
             mode="lines+markers", line={"color": "#f59e0b", "width": 3, "dash": "dash"},
         )
     settled = [a for a, entry in forecast_history.items()
-               if a >= recent.index[0] and entry["actual"] is not None]
+               if entry["path"].index[-1] >= recent.index[0] and entry["actual"] is not None]
     if settled:
         saved_anchor = max(settled)
         saved = forecast_history[saved_anchor]
