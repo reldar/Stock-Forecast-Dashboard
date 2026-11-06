@@ -13,6 +13,7 @@ from sklearn.preprocessing import StandardScaler
 
 forecast_tickers = ["NVDA", "GOOGL", "MU", "SPY"]
 eastern = ZoneInfo("America/New_York")
+corvallis = ZoneInfo("America/Los_Angeles")
 step = pd.Timedelta(minutes=15)
 
 market = mcal.get_calendar("NYSE")
