@@ -177,10 +177,11 @@ def add_news_markers(fig, ticker, prices):
     return marker_count
 
 
-def show_streaming_chart(ticker, extended):
-    st.subheader(f"Streaming chart · {ticker}")
+def show_streaming_chart(ticker, extended, *, overnight=False):
+    st.subheader(f"{'Overnight market' if overnight else 'Streaming chart'} · {ticker}")
     st.caption("One-minute bars from TradingView. Availability and delay depend on the feed.")
-    symbol = ("AMEX:" if ticker == "SPY" else "NASDAQ:") + ticker
+    exchange = "BOATS" if overnight else ("AMEX" if ticker == "SPY" else "NASDAQ")
+    symbol = f"{exchange}:{ticker}"
     settings = json.dumps({
         "autosize": True, "symbol": symbol, "interval": "1",
         "timezone": "America/Los_Angeles", "theme": "dark", "style": "1",
@@ -222,6 +223,9 @@ def dashboard():
         load_prices.clear()
         fetch_headlines.clear()
         load_minute_prices.clear()
+    with st.expander(f"Overnight market · {ticker}"):
+        st.caption("Blue Ocean ATS overnight prices. The amber model uses regular-session data.")
+        show_streaming_chart(ticker, extended=False, overnight=True)
     st.subheader("Latest prices and forecast")
     try:
         with st.spinner("Checking for the latest completed bars..."):
